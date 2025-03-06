@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scanner Connection Monitor</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+        .status-connected {
+            background-color: #28a745;
+        }
+        .status-disconnected {
+            background-color: #dc3545;
+        }
+        .card {
+            margin-bottom: 20px;
+        }
+        .scanner-card {
+            transition: all 0.3s ease;
+        }
+        .scanner-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+        }
+        .uptime-chart-container {
+            height: 300px;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <h1 class="mb-4">Scanner Connection Monitor</h1>
+        
+        <nav class="mb-4">
+            <a href="/dashboard/connection-monitor" class="btn btn-primary">Connection Monitor</a>
+            <a href="/dashboard/production" class="btn btn-secondary">Production Dashboard</a>
+        </nav>
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">Scanner Status Overview</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="scanner-status-container" class="row">
+                            <div class="text-center">
+                                <div class="spinner-border" role="status">
+                                    <span class="visually-hidden">Loading...</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">Recent Disconnections</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-striped">
+                                <thead>
+                                    <tr>
+                                        <th>Scanner</th>
+                                        <th>Time</th>
+                                        <th>Reason</th>
+                                        <th>Attempts</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="disconnection-table-body">
+                                    <tr>
+                                        <td colspan="4" class="text-center">
+                                            <div class="spinner-border" role="status">
+                                                <span class="visually-hidden">Loading...</span>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">7-Day Uptime</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="uptime-chart-container">
+                            <canvas id="uptime-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Format date for display
+        function formatDate(dateString) {
+            const date = new Date(dateString);
+            return date.toLocaleString();
+        }
+        
+        // Format time elapsed
+        function formatTimeElapsed(timestamp) {
+            const now = new Date();
+            const then = new Date(timestamp);
+            const diffMs = now - then;
+            
+            const diffSecs = Math.floor(diffMs / 1000);
+            if (diffSecs < 60) return `${diffSecs} seconds ago`;
+            
+            const diffMins = Math.floor(diffSecs / 60);
+            if (diffMins < 60) return `${diffMins} minutes ago`;
+            
+            const diffHours = Math.floor(diffMins / 60);
+            if (diffHours < 24) return `${diffHours} hours ago`;
+            
+            const diffDays = Math.floor(diffHours / 24);
+            return `${diffDays} days ago`;
+        }
+        
+        // Create status card for a scanner
+        function createScannerCard(scannerId, status) {
+            const isConnected = status.status === 'connected';
+            const statusClass = isConnected ? 'status-connected' : 'status-disconnected';
+            const statusText = isConnected ? 'Connected' : 'Disconnected';
+            const cardClass = isConnected ? 'border-success' : 'border-danger';
+            
+            return `
+                <div class="col-md-3 mb-3">
+                    <div class="card scanner-card ${cardClass}">
+                        <div class="card-body">
+                            <h5 class="card-title">${scannerId}</h5>
+                            <p class="card-text">
+                                <span class="status-indicator ${statusClass}"></span>
+                                ${statusText}
+                            </p>
+                            <p class="card-text">
+                                <small class="text-muted">
+                                    IP: ${status.ipAddress || 'N/A'}<br>
+                                    Port: ${status.port || 'N/A'}<br>
+                                    Last Change: ${formatTimeElapsed(status.lastStatusChange)}
+                                </small>
+                            </p>
+                            ${!isConnected ? `
+                            <button class="btn btn-sm btn-primary reconnect-btn" data-scanner="${scannerId}">
+                                Force Reconnect
+                            </button>
+                            ` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // Populate disconnection table
+        function populateDisconnectionTable(disconnections) {
+            const tableBody = document.getElementById('disconnection-table-body');
+            
+            if (disconnections.length === 0) {
+                tableBody.innerHTML = `
+                    <tr>
+                        <td colspan="4" class="text-center">No recent disconnections</td>
+                    </tr>
+                `;
+                return;
+            }
+            
+            let html = '';
+            disconnections.forEach(disconnection => {
+                html += `
+                    <tr>
+                        <td>${disconnection.scannerId}</td>
+                        <td>${formatDate(disconnection.timestamp)}</td>
+                        <td>${disconnection.errorMessage || 'Unknown'}</td>
+                        <td>${disconnection.reconnectAttempts}</td>
+                    </tr>
+                `;
+            });
+            
+            tableBody.innerHTML = html;
+        }
+        
+        // Create uptime chart
+        let uptimeChart = null;
+        function createUptimeChart(uptimeData) {
+            const ctx = document.getElementById('uptime-chart').getContext('2d');
+            
+            // Get all scanner IDs
+            const scannerIds = Object.keys(uptimeData);
+            
+            // Get all dates (last 7 days)
+            const dates = [];
+            const today = new Date();
+            for (let i = 6; i >= 0; i--) {
+                const date = new Date(today);
+                date.setDate(date.getDate() - i);
+                dates.push(date.toISOString().split('T')[0]);
+            }
+            
+            // Create datasets
+            const datasets = scannerIds.map((scannerId, index) => {
+                // Generate a color based on index
+                const hue = (index * 137) % 360;
+                const color = `hsl(${hue}, 70%, 60%)`;
+                
+                // Get uptime data for this scanner
+                const data = dates.map(date => {
+                    if (uptimeData[scannerId][date]) {
+                        return uptimeData[scannerId][date].uptime;
+                    }
+                    return 0;
+                });
+                
+                return {
+                    label: scannerId,
+                    data: data,
+                    borderColor: color,
+                    backgroundColor: `${color}33`,
+                    tension: 0.1
+                };
+            });
+            
+            // Destroy existing chart if it exists
+            if (uptimeChart) {
+                uptimeChart.destroy();
+            }
+            
+            // Create new chart
+            uptimeChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: dates.map(date => {
+                        const d = new Date(date);
+                        return d.toLocaleDateString();
+                    }),
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+                            title: {
+                                display: true,
+                                text: 'Uptime %'
+                            }
+                        }
+                    },
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: '7-Day Scanner Uptime'
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return `${context.dataset.label}: ${context.raw.toFixed(2)}%`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Force reconnect a scanner
+        async function reconnectScanner(scannerId) {
+            try {
+                const response = await fetch(`/api/scanners/${scannerId}/reconnect`, {
+                    method: 'POST'
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    alert(`Reconnection initiated for ${scannerId}`);
+                    // Refresh data after a short delay
+                    setTimeout(fetchData, 2000);
+                } else {
+                    alert(`Failed to reconnect ${scannerId}: ${data.message}`);
+                }
+            } catch (error) {
+                console.error('Error reconnecting scanner:', error);
+                alert('Error reconnecting scanner. See console for details.');
+            }
+        }
+        
+        // Fetch data from API
+        async function fetchData() {
+            try {
+                const response = await fetch('/dashboard/connection-monitor/data');
+                const data = await response.json();
+                
+                // Update scanner status cards
+                const statusContainer = document.getElementById('scanner-status-container');
+                let statusHtml = '';
+                
+                Object.entries(data.currentStatus).forEach(([scannerId, status]) => {
+                    statusHtml += createScannerCard(scannerId, status);
+                });
+                
+                statusContainer.innerHTML = statusHtml;
+                
+                // Add event listeners to reconnect buttons
+                document.querySelectorAll('.reconnect-btn').forEach(button => {
+                    button.addEventListener('click', () => {
+                        const scannerId = button.getAttribute('data-scanner');
+                        reconnectScanner(scannerId);
+                    });
+                });
+                
+                // Update disconnection table
+                populateDisconnectionTable(data.recentDisconnections);
+                
+                // Update uptime chart
+                createUptimeChart(data.uptimeData);
+                
+            } catch (error) {
+                console.error('Error fetching data:', error);
+            }
+        }
+        
+        // Initial data fetch
+        fetchData();
+        
+        // Refresh data every 30 seconds
+        setInterval(fetchData, 30000);
+    </script>
+</body>
+</html>
+
